@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Deadline Manager</title>
+</head>
+<body>
+  <deadline-manager></deadline-manager>
+
+  <script>
+    class DeadlineManager extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.deadlines = [];
+
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host {
+              font-family: sans-serif;
+              display: block;
+              max-width: 400px;
+              margin: auto;
+              padding: 0.5em;
+              background: #f9f9f9;
+              border-radius: 10px;
+              box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }
+
+            h2 {
+              text-align: center;
+              font-size: 1.2em;
+              margin-bottom: 0.5em;
+            }
+
+            .add-container, #deadlineForm, #deadlineList {
+              margin-bottom: 0.5em;
+            }
+
+            #deadlineForm {
+              display: none;
+              flex-direction: column;
+              gap: 0.4em;
+            }
+
+            input, select, button {
+              padding: 0.3em;
+              font-size: 0.9em;
+              border: 1px solid #ccc;
+              border-radius: 6px;
+            }
+
+            ul {
+              list-style: none;
+              padding: 0;
+              margin: 0;
+            }
+
+            li {
+              background: white;
+              margin: 0.4em 0;
+              padding: 0.5em;
+              border-radius: 6px;
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              transition: background 0.3s ease;
+              gap: 0.5em;
+              font-size: 0.9em;
+            }
+
+            .expired {
+              background: #ffcccc;
+            }
+
+            .shaking {
+              animation: shake 0.3s ease-in-out;
+			  animation-iteration-count: 3;
+            }
+
+            @keyframes shake {
+              0% { transform: translateX(-3px); }
+              50% { transform: translateX(3px); }
+              100% { transform: translateX(-3px); }
+            }
+
+            .countdown {
+              font-weight: bold;
+              font-family: monospace;
+            }
+
+            .completed .name {
+              text-decoration: line-through;
+              opacity: 0.6;
+            }
+
+            .name {
+              flex-grow: 1;
+            }
+
+            #toggleForm, #toggleList, #clearCompleted {
+              display: inline-block;
+              margin: 0.2em 0;
+              cursor: pointer;
+              font-size: 0.9em;
+              background: #e0e0e0;
+              border: none;
+              padding: 0.3em 0.6em;
+              border-radius: 6px;
+            }
+
+            .controls {
+              display: flex;
+			  justify-content: space-between;
+			  gap: 0.3em;
+			  flex-wrap: nowrap;
+			  overflow-x: auto;
+            }
+          </style>
+
+          <h2>Deadline Manager</h2>
+
+          <div class="controls">
+            <button id="toggleForm">+ Add New Deadline</button>
+            <button id="toggleList">▼ Show Deadlines</button>
+            <button id="clearCompleted">🧹 Clear Completed</button>
+          </div>
+
+          <form id="deadlineForm">
+            <input type="text" id="name" placeholder="Task Name" required />
+            <select id="inputType">
+              <option value="duration">Duration (HH:MM:SS)</option>
+              <option value="datetime">Date & Time</option>
+            </select>
+            <input type="text" id="timeInput" placeholder="e.g. 01:30:00 or 2025-12-31T23:59" required />
+            <button type="submit">Add Deadline</button>
+          </form>
+
+          <ul id="deadlineList" style="display: none;"></ul>
+        `;
+
+        this.form = this.shadowRoot.querySelector('#deadlineForm');
+        this.nameInput = this.shadowRoot.querySelector('#name');
+        this.timeInput = this.shadowRoot.querySelector('#timeInput');
+        this.inputType = this.shadowRoot.querySelector('#inputType');
+        this.deadlineList = this.shadowRoot.querySelector('#deadlineList');
+        this.toggleFormButton = this.shadowRoot.querySelector('#toggleForm');
+        this.toggleListButton = this.shadowRoot.querySelector('#toggleList');
+        this.clearButton = this.shadowRoot.querySelector('#clearCompleted');
+
+        this.toggleFormButton.addEventListener('click', () => {
+          this.form.style.display = this.form.style.display === 'flex' ? 'none' : 'flex';
+        });
+
+        this.toggleListButton.addEventListener('click', () => {
+          const isVisible = this.deadlineList.style.display === 'block';
+          this.deadlineList.style.display = isVisible ? 'none' : 'block';
+          this.toggleListButton.textContent = isVisible ? '▼ Show Deadlines' : '▲ Hide Deadlines';
+        });
+
+        this.clearButton.addEventListener('click', this.clearCompleted.bind(this));
+        this.form.addEventListener('submit', this.addDeadline.bind(this));
+		
+		this.inputType.addEventListener('change', () => {
+		  const type = this.inputType.value;
+		  this.timeInput.placeholder = type === 'duration'
+			? 'e.g. 01:30:00'
+			: 'e.g. 2025-12-31T23:59';
+		});
+		
+        this.interval = setInterval(this.updateCountdowns.bind(this), 1000);
+
+        this.loadFromStorage();
+      }
+
+      disconnectedCallback() {
+        clearInterval(this.interval);
+      }
+
+      saveToStorage() {
+        const saved = this.deadlines.map(dl => ({
+          name: dl.name,
+          time: dl.time.toISOString(),
+          complete: dl.complete,
+          expired: dl.expired
+        }));
+        localStorage.setItem('deadlines', JSON.stringify(saved));
+      }
+
+      loadFromStorage() {
+        const saved = JSON.parse(localStorage.getItem('deadlines') || '[]');
+        saved.forEach(item => {
+          this.createDeadlineElement(item.name, new Date(item.time), item.complete, item.expired);
+        });
+        this.sortAndRender();
+      }
+
+      parseTimeInput(type, input) {
+        if (type === 'duration') {
+          const parts = input.split(':');
+          if (parts.length !== 3) return null;
+          const [h, m, s] = parts.map(Number);
+          if ([h, m, s].some(isNaN)) return null;
+          return new Date(Date.now() + ((h * 3600 + m * 60 + s) * 1000));
+        } else if (type === 'datetime') {
+          const dt = new Date(input);
+          return isNaN(dt.getTime()) ? null : dt;
+        }
+        return null;
+      }
+
+      addDeadline(event) {
+        event.preventDefault();
+        const name = this.nameInput.value.trim();
+        const time = this.parseTimeInput(this.inputType.value, this.timeInput.value.trim());
+
+        if (!name || !time) {
+          alert('Invalid input');
+          return;
+        }
+
+        this.createDeadlineElement(name, time);
+        this.form.reset();
+        this.form.style.display = 'none';
+        this.deadlineList.style.display = 'block';
+        this.toggleListButton.textContent = '▲ Hide Deadlines';
+        this.sortAndRender();
+      }
+
+      createDeadlineElement(name, time, complete = false, expired = false) {
+        const li = document.createElement('li');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = complete;
+        if (complete) checkbox.disabled = true;
+
+        const nameSpan = document.createElement('span');
+        nameSpan.classList.add('name');
+        nameSpan.textContent = name;
+
+        const countdownSpan = document.createElement('span');
+        countdownSpan.className = 'countdown';
+
+        li.appendChild(checkbox);
+        li.appendChild(nameSpan);
+        li.appendChild(countdownSpan);
+
+        const deadline = {
+          name,
+          time,
+          element: li,
+          countdownEl: countdownSpan,
+          expired,
+          complete,
+          checkbox,
+          shakeTimeout: null
+        };
+
+        if (complete) li.classList.add('completed');
+        if (expired) li.classList.add('expired');
+
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) {
+            deadline.complete = true;
+            li.classList.add('completed');
+            checkbox.disabled = true;
+            this.saveToStorage();
+          }
+        });
+
+        this.deadlines.push(deadline);
+        this.sortAndRender();
+        this.saveToStorage();
+      }
+
+      updateCountdowns() {
+        const now = Date.now();
+
+        this.deadlines.forEach(deadline => {
+          if (deadline.complete) return;
+
+          const diff = deadline.time.getTime() - now;
+          const absDiff = Math.abs(diff);
+          const isExpired = diff <= 0;
+
+          const hours = String(Math.floor(absDiff / 3600000)).padStart(2, '0');
+          const minutes = String(Math.floor((absDiff % 3600000) / 60000)).padStart(2, '0');
+          const seconds = String(Math.floor((absDiff % 60000) / 1000)).padStart(2, '0');
+
+          deadline.countdownEl.textContent = `${isExpired ? '-' : ''}${hours}:${minutes}:${seconds}`;
+
+          if (isExpired && !deadline.expired) {
+            deadline.expired = true;
+            deadline.element.classList.add('expired', 'shaking');
+            deadline.shakeTimeout = setTimeout(() => {
+              deadline.element.classList.remove('shaking');
+            }, 3000);
+            this.deadlineList.style.display = 'block';
+            this.toggleListButton.textContent = '▲ Hide Deadlines';
+            this.saveToStorage();
+          }
+        });
+
+        this.sortAndRender();
+      }
+
+      sortAndRender() {
+        // Clear list
+        while (this.deadlineList.firstChild) {
+          this.deadlineList.removeChild(this.deadlineList.firstChild);
+        }
+
+        // Sort by time remaining
+        const now = Date.now();
+        const sorted = [...this.deadlines].sort((a, b) => {
+          const aTime = a.complete ? Infinity : a.time.getTime() - now;
+          const bTime = b.complete ? Infinity : b.time.getTime() - now;
+          return aTime - bTime;
+        });
+
+        sorted.forEach(dl => {
+          this.deadlineList.appendChild(dl.element);
+        });
+      }
+
+      clearCompleted() {
+        this.deadlines = this.deadlines.filter(dl => {
+          if (dl.complete) {
+            dl.element.remove();
+            return false;
+          }
+          return true;
+        });
+        this.saveToStorage();
+      }
+    }
+
+    customElements.define('deadline-manager', DeadlineManager);
+  </script>
+</body>
+</html>
